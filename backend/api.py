@@ -21,6 +21,7 @@ from backend.services.gemini_briefing import generate_financial_briefing
 from backend.services.what_if import run_what_if_simulation
 from backend.services.decision_engine import compare_interventions
 from backend.ml.payment_timing_model import get_model_bundle, predict_synthetic_timing
+from backend.services.demo_business_history import generate_business_history
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -121,6 +122,19 @@ def health():
         "service": "Nesshield AI",
         "version": app.version,
     }
+
+
+@app.get("/api/demo-business-history")
+def demo_business_history():
+    """Return a fictional two-year operating dataset for dashboard demos."""
+    try:
+        return generate_business_history()
+    except Exception as exc:
+        logging.exception("Unable to generate demo business history")
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to generate illustrative business history.",
+        ) from exc
 
 
 @app.get("/api/account")

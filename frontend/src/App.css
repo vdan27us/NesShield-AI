@@ -18,8 +18,11 @@
 }
 
 * { box-sizing: border-box; }
+html { scroll-behavior: smooth; scroll-padding-top: 24px; }
 body { margin: 0; min-width: 320px; min-height: 100vh; }
 button { font: inherit; cursor: pointer; }
+a { text-decoration: none; }
+.page-anchor { scroll-margin-top: 24px; }
 .app-shell { min-height: 100vh; background: var(--bg); }
 .sidebar { position: fixed; inset: 0 auto 0 0; width: 248px; background: #0d171c; border-right: 1px solid var(--border); padding: 28px 16px; display: flex; flex-direction: column; z-index: 5; }
 .brand { display: flex; align-items: center; gap: 11px; padding: 0 10px 38px; }
@@ -30,7 +33,9 @@ button { font: inherit; cursor: pointer; }
 .nav-label, .eyebrow { font-size: 10px; letter-spacing: 1.4px; font-weight: 700; color: #71858b; }
 .nav-label { padding: 0 12px 12px; }
 .sidebar nav { display: grid; gap: 6px; }
-.nav-item { display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 9px; font-size: 13px; color: #92a2a7; }
+.nav-item { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 42px; padding: 12px; border: 0; border-radius: 9px; background: transparent; text-align: left; font: inherit; font-size: 13px; color: #92a2a7; transition: background .16s ease, color .16s ease; }
+.nav-item:hover { background: #14262a; color: #d6e6e4; }
+.nav-item:focus-visible { outline: 2px solid var(--green); outline-offset: 2px; }
 .nav-item.active { background: #18332c; color: #60e0ad; font-weight: 600; }
 .sidebar-bottom { margin-top: auto; display: grid; gap: 14px; }
 .sidebar-status { border: 1px solid #25383e; background: #111f24; border-radius: 10px; padding: 14px 12px; display: flex; align-items: center; gap: 10px; }
@@ -135,7 +140,6 @@ h2 { font: 700 15px Manrope, sans-serif; letter-spacing: -.2px; }
   .brand { padding-bottom: 15px; }
   .sidebar nav { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .sidebar-bottom { margin-top: 15px; }
-  .sidebar-bottom > .nav-item { display: none; }
   .main-content { margin-left: 0; padding: 20px 14px; }
   .topbar { align-items: flex-start; }
   .top-actions { display: none; }
@@ -774,4 +778,71 @@ button:disabled {
 
 .payment-timing-grid {
   margin-top: 16px;
+}
+
+.overview-detail-grid,
+.risk-detail-grid,
+.methodology-grid {
+  margin-top: 18px;
+}
+
+.operational-metrics,
+.methodology-metrics {
+  margin-top: 16px;
+}
+
+.detail-subheading {
+  color: #dce9e8;
+  font-size: 13px;
+  margin: 18px 0 4px;
+}
+
+.method-steps {
+  display: grid;
+  gap: 14px;
+  margin: 18px 0 0;
+  padding-left: 22px;
+  color: #42d6a0;
+}
+
+.method-steps li { padding-left: 5px; }
+.method-steps strong,
+.method-steps span { display: block; }
+.method-steps strong { color: #e5efee; font-size: 12px; }
+.method-steps span { color: #91a4aa; font-size: 11px; line-height: 1.7; margin-top: 4px; }
+
+.methodology-metrics .metric-value { font-size: clamp(16px, 1.7vw, 22px); }
+
+.history-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 28px;
+  padding-bottom: 10px;
+  border-bottom: 1px solid #25353c;
+}
+
+.history-header h3 { color: #e5efee; font-size: 14px; }
+.history-header span { color: #81959c; font-size: 10px; }
+.history-table-wrap { max-width: 100%; overflow-x: auto; }
+.history-table { width: 100%; min-width: 690px; border-collapse: collapse; font-size: 11px; }
+.history-table th { padding: 11px 9px; color: #81959c; font-size: 9px; font-weight: 600; letter-spacing: .06em; text-align: left; text-transform: uppercase; }
+.history-table td { padding: 11px 9px; border-top: 1px solid #1e2b31; color: #afc0c3; vertical-align: middle; }
+.history-table td strong,
+.history-table td small { display: block; }
+.history-table td strong { color: #dce8e8; font-size: 11px; font-weight: 600; }
+.history-table td small { margin-top: 4px; color: #81959c; font-size: 9px; }
+.history-table .numeric { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.positive-text { color: #5dd9a6 !important; }
+.negative-text { color: #e6a65c !important; }
+.history-status { display: inline-block; padding: 4px 7px; border-radius: 20px; background: #1a2d27; color: #65d9a6; font-size: 9px; text-transform: capitalize; }
+.history-status.outflow { background: #30281e; color: #e6b46c; }
+.history-status.inflow { background: #1a2d27; color: #65d9a6; }
+
+@media (max-width: 900px) {
+  .overview-detail-grid,
+  .risk-detail-grid,
+  .methodology-grid { grid-template-columns: 1fr; }
+  .history-header { align-items: flex-start; flex-direction: column; }
 }
