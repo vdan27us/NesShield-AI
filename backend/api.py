@@ -19,6 +19,7 @@ from backend.quant.simulation_engine import SimulationEvent
 from backend.quant.stress_testing import run_stress_tests
 from backend.services.gemini_briefing import generate_financial_briefing
 from backend.services.what_if import run_what_if_simulation
+from backend.services.decision_engine import compare_interventions
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -69,14 +70,14 @@ def get_account_data():
     return client, account
 
 
-def get_pending_simulation_context():
+def get_pending_simulation_context(horizon_days: int = HORIZON_DAYS):
     """Build the same seven-day pending-event view for risk endpoints."""
     client, account = get_account_data()
     deposits = client.get_deposits()
     withdrawals = client.get_withdrawals()
 
     today = date.today()
-    end_date = today + timedelta(days=HORIZON_DAYS)
+    end_date = today + timedelta(days=horizon_days)
 
     ledger = build_ledger(
         deposits=deposits,
@@ -152,6 +153,32 @@ def risk():
         raise HTTPException(
             status_code=500,
             detail=f"Unable to calculate Monte Carlo risk: {exc}",
+        ) from exc
+
+
+@app.get("/api/decision")
+def decision():
+    """Compare low-cost timing actions against the same risk scenarios."""
+    try:
+        account_data, events = get_pending_simulation_context(horizon_days=14)
+        return {
+            "decision": compare_interventions(
+                starting_balance=float(account_data["balance"]),
+                events=events,
+                horizon_days=14,
+                simulations=DEFAULT_SIMULATIONS,
+                safety_buffer=SAFETY_BUFFER,
+                seed=RANDOM_SEED,
+                inflow_clear_probability=DEPOSIT_CLEAR_PROBABILITY,
+                max_inflow_delay_days=MAX_DEPOSIT_DELAY_DAYS,
+                max_outflow_uplift=MAX_OUTFLOW_UPLIFT,
+            )
+        }
+    except Exception as exc:
+        logging.exception("Intervention comparison failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to compare financial interventions.",
         ) from exc
 
 

@@ -53,6 +53,8 @@ function App() {
   const [paymentTiming, setPaymentTiming] = useState(null);
   const [paymentTimingLoading, setPaymentTimingLoading] = useState(true);
   const [paymentTimingError, setPaymentTimingError] = useState("");
+  const [decisionData, setDecisionData] = useState(null);
+  const [decisionError, setDecisionError] = useState("");
   const [connected, setConnected] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -201,6 +203,19 @@ function App() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`${API}/api/decision`)
+      .then(async (response) => {
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.detail || "Intervention analysis unavailable.");
+        return data.decision;
+      })
+      .then((data) => { if (!cancelled) setDecisionData(data); })
+      .catch((err) => { if (!cancelled) setDecisionError(err.message); });
+    return () => { cancelled = true; };
   }, []);
 
   const loadBriefing = useCallback(async () => {
@@ -886,6 +901,52 @@ function App() {
               </div>
             </>
           )}
+        </section>
+
+        <section className="panel payment-timing-panel">
+          <div className="panel-header">
+            <div>
+              <h2>Liquidity Actions</h2>
+              <p>Same simulated futures, compared against a 5% buffer-breach target</p>
+            </div>
+            <div className="metric-icon green"><ShieldCheck size={18} /></div>
+          </div>
+          {risk?.daily_balance_percentiles && (
+            <div className="chart-area" role="img" aria-label="Simulated cash balance fan chart">
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={Object.entries(risk.daily_balance_percentiles).map(([day, values]) => ({ day: `Day ${day}`, ...values }))}>
+                  <CartesianGrid stroke="#263940" strokeDasharray="3 3" />
+                  <XAxis dataKey="day" stroke="#81959c" tick={{ fontSize: 10 }} />
+                  <YAxis stroke="#81959c" tick={{ fontSize: 10 }} tickFormatter={(value) => `$${Math.round(value / 1000)}k`} />
+                  <Tooltip formatter={(value) => money(value)} />
+                  <Area type="monotone" dataKey="p95" stroke="#42d6a0" fill="#42d6a0" fillOpacity={0.08} name="95th percentile" />
+                  <Area type="monotone" dataKey="p50" stroke="#79b9f3" fill="none" name="Median" />
+                  <Area type="monotone" dataKey="p05" stroke="#edbb68" fill="none" name="5th percentile" />
+                </AreaChart>
+              </ResponsiveContainer>
+            </div>
+          )}
+          {decisionData ? (
+            <>
+              {decisionData.recommended_action ? (
+                <div className="payment-timing-status">
+                  <span className="payment-timing-dot" />
+                  <div>
+                    <strong>Lowest-cost feasible action: {decisionData.recommended_action.name}</strong>
+                    <p>Estimated cost {money(decisionData.recommended_action.cost)} · buffer-breach risk {percentage(decisionData.recommended_action.safety_buffer_breach_probability)}</p>
+                  </div>
+                </div>
+              ) : <p className="payment-timing-message">No tested action meets the risk target with the current scheduled events.</p>}
+              <div className="whatif-forecast-list">
+                {decisionData.comparisons?.map((item) => (
+                  <div className="whatif-forecast-row" key={item.name}>
+                    <span>{item.name} · cost {money(item.cost)}</span>
+                    <span>{percentage(item.safety_buffer_breach_probability)} breach · {money(item.cvar_95)} CVaR</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          ) : <p className="payment-timing-message">{decisionError || "Loading intervention comparison…"}</p>}
         </section>
 
         <section className="panel whatif-panel">
