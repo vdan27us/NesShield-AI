@@ -718,3 +718,60 @@ button:disabled {
     font-size: 16px;
   }
 }
+
+
+/* Payment timing intelligence */
+.payment-timing-panel {
+  margin-top: 20px;
+}
+
+.payment-timing-message {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 14px 0;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.payment-timing-error {
+  color: #e6a6a6;
+}
+
+.payment-timing-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px;
+  margin-top: 16px;
+  border: 1px solid #234b3b;
+  border-radius: 9px;
+  background: #173027;
+}
+
+.payment-timing-dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  margin-top: 5px;
+  border-radius: 50%;
+  background: #d8a452;
+}
+
+.payment-timing-status strong {
+  display: block;
+  font-size: 13px;
+  color: #e7f3ed;
+}
+
+.payment-timing-status p {
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.payment-timing-grid {
+  margin-top: 16px;
+}

@@ -1,5 +1,11 @@
 
-from nessie_client import NessieClient
+"""Manual smoke test for the Nessie sandbox client.
+
+Run from the project root with:
+    python -m backend.data.test_nessie_client
+"""
+
+from backend.data.nessie_client import NessieClient
 
 
 def main():
@@ -9,28 +15,9 @@ def main():
     deposits = client.get_deposits()
     withdrawals = client.get_withdrawals()
 
-    print("Account:", account.get("nickname"))
-    print("Current balance:", account.get("balance"))
+    print("Account retrieved:", bool(account))
     print("Deposits found:", len(deposits))
     print("Withdrawals found:", len(withdrawals))
-
-    print("\nDeposits:")
-    for item in deposits:
-        print({
-            "date": item.get("transaction_date"),
-            "amount": item.get("amount"),
-            "status": item.get("status"),
-            "description": item.get("description"),
-        })
-
-    print("\nWithdrawals:")
-    for item in withdrawals:
-        print({
-            "date": item.get("transaction_date"),
-            "amount": item.get("amount"),
-            "status": item.get("status"),
-            "description": item.get("description"),
-        })
 
 
 if __name__ == "__main__":

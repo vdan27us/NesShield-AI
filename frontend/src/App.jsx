@@ -45,25 +45,14 @@ const percentage = (value, digits = 2) =>
     ? `${(Number(value) * 100).toFixed(digits)}%`
     : "—";
 
-const formatDate = (dateString) => {
-  if (!dateString) return "Date unavailable";
-
-  const date = new Date(`${dateString}T12:00:00`);
-
-  if (Number.isNaN(date.getTime())) return dateString;
-
-  return date.toLocaleDateString("en-US", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  });
-};
-
 function App() {
   const [account, setAccount] = useState(null);
   const [forecast, setForecast] = useState([]);
   const [risk, setRisk] = useState(null);
   const [mlRisk, setMlRisk] = useState(null);
+  const [paymentTiming, setPaymentTiming] = useState(null);
+  const [paymentTimingLoading, setPaymentTimingLoading] = useState(true);
+  const [paymentTimingError, setPaymentTimingError] = useState("");
   const [connected, setConnected] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -166,8 +155,53 @@ function App() {
   }, []);
 
   useEffect(() => {
-    loadDashboard();
+    const timer = window.setTimeout(() => {
+      void loadDashboard();
+    }, 0);
+
+    return () => window.clearTimeout(timer);
   }, [loadDashboard]);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadPaymentTiming() {
+      setPaymentTimingLoading(true);
+      setPaymentTimingError("");
+
+      try {
+        const response = await fetch(`${API}/api/payment-timing`);
+
+        if (!response.ok) {
+          throw new Error(
+            `Payment-timing request failed (HTTP ${response.status}).`
+          );
+        }
+
+        const data = await response.json();
+
+        if (!cancelled) {
+          setPaymentTiming(data);
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setPaymentTimingError(
+            err.message || "Unable to load payment-timing status."
+          );
+        }
+      } finally {
+        if (!cancelled) {
+          setPaymentTimingLoading(false);
+        }
+      }
+    }
+
+    loadPaymentTiming();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const loadBriefing = useCallback(async () => {
     setBriefingLoading(true);
@@ -194,7 +228,11 @@ function App() {
   }, []);
 
   useEffect(() => {
-    loadBriefing();
+    const timer = window.setTimeout(() => {
+      void loadBriefing();
+    }, 0);
+
+    return () => window.clearTimeout(timer);
   }, [loadBriefing]);
 
   const updateWhatIfInput = (field, value) => {
@@ -787,6 +825,66 @@ function App() {
                 ? "Loading ML assessment…"
                 : "ML assessment unavailable. Refresh the dashboard to try again."}
             </p>
+          )}
+        </section>
+
+        <section className="panel payment-timing-panel">
+          <div className="panel-header">
+            <div>
+              <h2>Payment Timing Intelligence</h2>
+              <p>Historical settlement-data readiness</p>
+            </div>
+            <div className="metric-icon blue">
+              <CalendarDays size={18} />
+            </div>
+          </div>
+
+          {paymentTimingLoading ? (
+            <p className="payment-timing-message">
+              Checking verified settlement history…
+            </p>
+          ) : paymentTimingError ? (
+            <div className="payment-timing-message payment-timing-error">
+              <AlertTriangle size={17} />
+              <span>{paymentTimingError}</span>
+            </div>
+          ) : (
+            <>
+              <div className="payment-timing-status">
+                <span className="payment-timing-dot" />
+                <div>
+                  <strong>
+                    {paymentTiming?.status === "available"
+                      ? "Historical baseline available"
+                      : "Historical baseline unavailable"}
+                  </strong>
+                  <p>
+                    {paymentTiming?.reason ||
+                      "Verified settlement history is needed to estimate payment delays."}
+                  </p>
+                </div>
+              </div>
+
+              <div className="ml-scenario-grid payment-timing-grid">
+                <div>
+                  <span>Verified observations</span>
+                  <strong>{paymentTiming?.observations ?? 0}</strong>
+                </div>
+                <div>
+                  <span>Transactions inspected</span>
+                  <strong>{paymentTiming?.transactions_inspected ?? "—"}</strong>
+                </div>
+              </div>
+
+              <div className="assumption-note">
+                <AlertTriangle size={16} />
+                <span>
+                  No payment-timing prediction is made without sufficient verified
+                  settlement data. Monte Carlo delay assumptions are separate from
+                  historical model estimates.
+                </span>
+              </div>
+            </>
           )}
         </section>
 

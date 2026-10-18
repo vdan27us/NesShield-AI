@@ -158,3 +158,40 @@ def test_risk_attribution_endpoint_validates_correlation():
     )
     assert response.status_code == 422
 
+
+
+def test_payment_timing_endpoint_reports_missing_settlement_history(
+    monkeypatch,
+):
+    class FakeClient:
+        def get_deposits(self):
+            return [{"amount": 100, "transaction_date": "2026-10-10"}]
+
+        def get_withdrawals(self):
+            return [{"amount": 50, "transaction_date": "2026-10-11"}]
+
+    monkeypatch.setattr(api, "get_client", lambda: FakeClient())
+
+    response = client.get("/api/payment-timing")
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "unavailable"
+    assert data["estimated_delay_days"] is None
+    assert data["transactions_inspected"] == 2
+    assert "settlement" in data["reason"].lower()
+
+
+def test_payment_timing_endpoint_handles_nessie_errors(monkeypatch):
+    class BrokenClient:
+        def get_deposits(self):
+            raise RuntimeError("Simulated upstream failure")
+
+    monkeypatch.setattr(api, "get_client", lambda: BrokenClient())
+
+    response = client.get("/api/payment-timing")
+
+    assert response.status_code == 502
+    assert response.json()["detail"] == (
+        "Unable to inspect payment-timing data."
+    )

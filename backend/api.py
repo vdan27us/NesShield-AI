@@ -10,9 +10,9 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
-from backend.data.ledger import build_ledger
 from backend.data.nessie_client import NessieClient
-from backend.quant.cashflow import project_cashflow
+from backend.data.ledger import build_ledger
+from backend.quant.cashflow import project_cashflow 
 from backend.quant.monte_carlo import run_monte_carlo
 from backend.quant.risk_attribution import run_risk_attribution
 from backend.quant.simulation_engine import SimulationEvent
@@ -182,7 +182,6 @@ def stress_test(
             inflow_clear_probability=DEPOSIT_CLEAR_PROBABILITY,
             max_inflow_delay_days=MAX_DEPOSIT_DELAY_DAYS,
             max_outflow_uplift=MAX_OUTFLOW_UPLIFT,
-            shock_correlation=shock_correlation,
         )
 
         return {
@@ -243,6 +242,48 @@ def risk_attribution(
             status_code=500,
             detail="Unable to calculate risk attribution. Check backend logs.",
         ) from exc
+
+
+@app.get("/api/payment-timing")
+def payment_timing():
+    """Report whether verified payment-timing history is available."""
+    try:
+        client = get_client()
+        deposits = client.get_deposits()
+        withdrawals = client.get_withdrawals()
+
+        # Nessie currently provides scheduled transaction dates,
+        # not verified actual settlement dates. Do not use the
+        # ledger's calculated effective_date as an actual outcome.
+        transactions = deposits + withdrawals
+
+        return {
+            "model": "Historical median baseline",
+            "status": "unavailable",
+            "estimated_delay_days": None,
+            "observations": 0,
+            "reason": (
+                "Nessie transaction records do not currently expose "
+                "verified actual settlement dates."
+            ),
+            "transactions_inspected": len(transactions),
+            "data_source": "Nessie sandbox",
+            "limitations": [
+                "No payment-timing prediction is being made.",
+                "The existing shortfall model is unchanged.",
+                "Verified settlement outcomes are required "
+                "before estimating historical payment delays."
+            ],
+        }
+
+    except Exception as exc:
+        logging.exception("Payment-timing data inspection failed")
+        raise HTTPException(
+            status_code=502,
+            detail="Unable to inspect payment-timing data.",
+        ) from exc
+
+
 
 
 @app.get("/api/ml-risk")
