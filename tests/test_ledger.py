@@ -10,66 +10,75 @@ TODAY = date(2026, 10, 18)
 
 
 def test_overdue_pending_deposit_is_not_dropped():
-    event = normalize_event(
-        {
-            "_id": "deposit-1",
-            "amount": 3000,
-            "transaction_date": "2026-10-17",
-            "status": "pending",
-        },
-        "inflow",
+    warnings = []
+
+    ledger = build_ledger(
+        deposits=[
+            {
+                "_id": "old-deposit",
+                "amount": 500,
+                "transaction_date": "2026-10-17",
+                "status": "pending",
+            }
+        ],
+        withdrawals=[],
         today=TODAY,
+        warnings=warnings,
     )
 
-    assert event.amount == 3000
-    assert event.scheduled_date == date(2026, 10, 17)
-    assert event.effective_date == TODAY
-    assert event.is_overdue is True
+    assert len(ledger) == 1
+    assert ledger[0].is_overdue is True
+    assert ledger[0].scheduled_date == date(2026, 10, 17)
+    assert ledger[0].effective_date == TODAY
 
 
 def test_future_pending_withdrawal_keeps_its_date():
-    event = normalize_event(
-        {
-            "_id": "payroll-1",
-            "amount": 7000,
-            "transaction_date": "2026-10-20",
-            "status": "pending",
-        },
-        "outflow",
+    ledger = build_ledger(
+        deposits=[],
+        withdrawals=[
+            {
+                "_id": "future-withdrawal",
+                "amount": 700,
+                "transaction_date": "2026-10-20",
+                "status": "pending",
+            }
+        ],
         today=TODAY,
     )
 
-    assert event.effective_date == date(2026, 10, 20)
-    assert event.is_overdue is False
+    assert len(ledger) == 1
+    assert ledger[0].kind == "outflow"
+    assert ledger[0].effective_date == date(2026, 10, 20)
 
 
 def test_hypothetical_event_is_explicit():
-    events = build_ledger(
+    ledger = build_ledger(
         deposits=[],
         withdrawals=[],
         today=TODAY,
         hypothetical_events=[
             {
-                "id": "scenario-deposit",
+                "_id": "what-if-deposit",
                 "kind": "inflow",
-                "amount": 500,
+                "amount": 250,
                 "transaction_date": "2026-10-19",
                 "status": "hypothetical",
             }
         ],
     )
 
-    assert len(events) == 1
-    assert events[0].status == "hypothetical"
-    assert events[0].source == "hypothetical"
+    assert len(ledger) == 1
+    assert ledger[0].status == "hypothetical"
+    assert ledger[0].source == "hypothetical"
 
 
-def test_invalid_amount_is_rejected():
+def test_invalid_amount_is_rejected_by_normalizer():
     with pytest.raises(ValueError):
         normalize_event(
             {
+                "_id": "bad-amount",
                 "amount": -100,
-                "transaction_date": "2026-10-20",
+                "transaction_date": "2026-10-19",
                 "status": "pending",
             },
             "outflow",
@@ -77,17 +86,90 @@ def test_invalid_amount_is_rejected():
         )
 
 
-def test_duplicate_event_ids_are_rejected():
-    transaction = {
-        "_id": "duplicate-1",
-        "amount": 100,
-        "transaction_date": "2026-10-20",
-        "status": "pending",
-    }
+def test_duplicate_event_ids_are_deduplicated_with_warning():
+    warnings = []
 
-    with pytest.raises(ValueError, match="Duplicate ledger event ID"):
-        build_ledger(
-            deposits=[transaction],
-            withdrawals=[transaction],
-            today=TODAY,
-        )
+    ledger = build_ledger(
+        deposits=[
+            {
+                "_id": "duplicate-id",
+                "amount": 500,
+                "transaction_date": "2026-10-19",
+                "status": "pending",
+            },
+            {
+                "_id": "duplicate-id",
+                "amount": 900,
+                "transaction_date": "2026-10-20",
+                "status": "pending",
+            },
+        ],
+        withdrawals=[],
+        today=TODAY,
+        warnings=warnings,
+    )
+
+    assert len(ledger) == 1
+    assert ledger[0].amount == 500
+    assert any("duplicate" in warning.lower() for warning in warnings)
+
+
+def test_unknown_status_uses_pending_fallback_with_warning():
+    warnings = []
+
+    ledger = build_ledger(
+        deposits=[
+            {
+                "_id": "unknown-status",
+                "amount": 100,
+                "transaction_date": "2026-10-19",
+                "status": "awaiting_review",
+            }
+        ],
+        withdrawals=[],
+        today=TODAY,
+        warnings=warnings,
+    )
+
+    assert len(ledger) == 1
+    assert ledger[0].status == "pending"
+    assert warnings
+
+
+def test_posted_status_normalizes_to_confirmed():
+    ledger = build_ledger(
+        deposits=[
+            {
+                "_id": "posted-deposit",
+                "amount": 100,
+                "transaction_date": "2026-10-18",
+                "status": "posted",
+            }
+        ],
+        withdrawals=[],
+        today=TODAY,
+    )
+
+    assert len(ledger) == 1
+    assert ledger[0].status == "confirmed"
+
+
+def test_invalid_external_record_is_skipped_with_warning():
+    warnings = []
+
+    ledger = build_ledger(
+        deposits=[
+            {
+                "_id": "bad-record",
+                "amount": "not-a-number",
+                "transaction_date": "2026-10-19",
+                "status": "pending",
+            }
+        ],
+        withdrawals=[],
+        today=TODAY,
+        warnings=warnings,
+    )
+
+    assert ledger == []
+    assert len(warnings) == 1

@@ -1,11 +1,14 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, dataclass
 from datetime import date
 from math import isfinite
 from typing import Any, Iterable
 
+
+logger = logging.getLogger(__name__)
 
 VALID_KINDS = {"inflow", "outflow"}
 
@@ -14,12 +17,18 @@ VALID_STATUSES = {
     "pending",
     "scheduled",
     "hypothetical",
+    "cancelled",
 }
 
-# External status names mapped to our canonical ledger vocabulary.
 STATUS_ALIASES = {
     "posted": "confirmed",
     "cleared": "confirmed",
+    "completed": "confirmed",
+    "settled": "confirmed",
+    "canceled": "cancelled",
+    "void": "cancelled",
+    "voided": "cancelled",
+    "reversed": "cancelled",
 }
 
 
@@ -43,19 +52,23 @@ class LedgerEvent:
         return result
 
 
+def _warn(message: str, warnings: list[str] | None) -> None:
+    """Log a data-quality warning and optionally collect it."""
+    logger.warning(message)
+
+    if warnings is not None:
+        warnings.append(message)
+
+
 def normalize_event(
     record: dict[str, Any],
     kind: str,
     *,
     today: date | None = None,
     source: str = "nessie",
+    warnings: list[str] | None = None,
 ) -> LedgerEvent:
-    """
-    Convert an external transaction into a canonical ledger event.
-
-    Overdue pending events remain visible and become effective today.
-    Posted and cleared transactions are normalized to confirmed.
-    """
+    """Normalize one external transaction into a canonical ledger event."""
     if kind not in VALID_KINDS:
         raise ValueError(f"Unsupported event kind: {kind!r}")
 
@@ -101,9 +114,12 @@ def normalize_event(
     )
 
     if status not in VALID_STATUSES:
-        raise ValueError(
-            f"Unsupported transaction status: {external_status!r}"
+        _warn(
+            f"Unknown transaction status {external_status!r}; "
+            "using conservative 'pending' fallback.",
+            warnings,
         )
+        status = "pending"
 
     is_overdue = (
         status == "pending"
@@ -143,48 +159,65 @@ def build_ledger(
     *,
     today: date | None = None,
     hypothetical_events: Iterable[dict[str, Any]] = (),
+    warnings: list[str] | None = None,
 ) -> list[LedgerEvent]:
-    """Normalize inflows and outflows into one sorted event ledger."""
+    """Build a normalized ledger while reporting data-quality issues."""
     today = today or date.today()
     events: list[LedgerEvent] = []
 
-    for record in deposits:
-        events.append(
-            normalize_event(
+    records = [
+        (record, "inflow", "nessie_deposit")
+        for record in deposits
+    ] + [
+        (record, "outflow", "nessie_withdrawal")
+        for record in withdrawals
+    ]
+
+    for record, kind, source in records:
+        try:
+            event = normalize_event(
                 record,
-                "inflow",
+                kind,
                 today=today,
-                source="nessie_deposit",
+                source=source,
+                warnings=warnings,
             )
-        )
-
-    for record in withdrawals:
-        events.append(
-            normalize_event(
-                record,
-                "outflow",
-                today=today,
-                source="nessie_withdrawal",
+        except (ValueError, TypeError) as exc:
+            _warn(
+                f"Skipping invalid {source} record: {exc}",
+                warnings,
             )
-        )
-
-    for record in hypothetical_events:
-        event = normalize_event(
-            record,
-            str(record.get("kind", "")),
-            today=today,
-            source="hypothetical",
-        )
-
-        if event.status != "hypothetical":
-            raise ValueError(
-                "Hypothetical events must use "
-                "status='hypothetical'"
-            )
+            continue
 
         events.append(event)
 
-    # Outflows sort before inflows on the same date.
+    for record in hypothetical_events:
+        try:
+            event = normalize_event(
+                record,
+                str(record.get("kind", "")),
+                today=today,
+                source="hypothetical",
+                warnings=warnings,
+            )
+        except (ValueError, TypeError) as exc:
+            _warn(
+                f"Skipping invalid hypothetical record: {exc}",
+                warnings,
+            )
+            continue
+
+        if event.status != "hypothetical":
+            _warn(
+                f"Skipping hypothetical event {event.event_id!r}: "
+                "status must be 'hypothetical'.",
+                warnings,
+            )
+            continue
+
+        events.append(event)
+
+    # Outflows sort before inflows on the same day.
     events.sort(
         key=lambda event: (
             event.effective_date,
@@ -193,14 +226,19 @@ def build_ledger(
         )
     )
 
+    unique_events: list[LedgerEvent] = []
     seen_ids: set[str] = set()
 
     for event in events:
         if event.event_id in seen_ids:
-            raise ValueError(
-                f"Duplicate ledger event ID: {event.event_id}"
+            _warn(
+                f"Skipping duplicate ledger event ID: "
+                f"{event.event_id!r}",
+                warnings,
             )
+            continue
 
         seen_ids.add(event.event_id)
+        unique_events.append(event)
 
-    return events
+    return unique_events
