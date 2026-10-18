@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from hashlib import blake2b
+from math import ceil
+from statistics import NormalDist
 from typing import Literal
 
 import numpy as np
@@ -11,6 +13,9 @@ import numpy as np
 
 EventKind = Literal["inflow", "outflow"]
 RandomShockMap = dict[str, dict[str, np.ndarray]]
+
+RISK_CONFIDENCE_LEVEL = 0.95
+TAIL_PROBABILITY = 1.0 - RISK_CONFIDENCE_LEVEL
 
 
 @dataclass(frozen=True)
@@ -24,7 +29,7 @@ class SimulationEvent:
 
 
 def _event_keys(events: list[SimulationEvent]) -> list[str]:
-    """Return stable shock keys and reject duplicate explicit IDs."""
+    """Return stable shock keys and reject duplicate IDs."""
     keys = []
     seen = set()
 
@@ -42,6 +47,43 @@ def _event_keys(events: list[SimulationEvent]) -> list[str]:
     return keys
 
 
+def _seed_for(seed: int, key: str) -> int:
+    """Create a deterministic NumPy seed from a stable key."""
+    digest = blake2b(
+        f"{seed}:{key}".encode("utf-8"),
+        digest_size=8,
+    ).digest()
+    return int.from_bytes(digest, "little")
+
+
+def _normal_to_uniform(values: np.ndarray) -> np.ndarray:
+    """Transform standard-normal values into uniform values via its CDF."""
+    normal = NormalDist()
+
+    return np.fromiter(
+        (normal.cdf(float(value)) for value in values),
+        dtype=float,
+        count=len(values),
+    )
+
+
+def _lower_tail_mean(
+    values: np.ndarray,
+    tail_probability: float,
+) -> float:
+    """Return the mean of the worst fraction of observations."""
+    if values.size == 0:
+        raise ValueError("Cannot calculate tail mean of empty values")
+
+    if not 0 < tail_probability <= 1:
+        raise ValueError("tail_probability must be in (0, 1]")
+
+    tail_count = max(1, ceil(values.size * tail_probability))
+    worst_values = np.partition(values, tail_count - 1)[:tail_count]
+
+    return float(np.mean(worst_values))
+
+
 def generate_random_shocks(
     *,
     events: list[SimulationEvent],
@@ -49,21 +91,23 @@ def generate_random_shocks(
     seed: int = 42,
     max_inflow_delay_days: int = 3,
     max_outflow_uplift: float = 0.15,
+    shock_correlation: float = 0.0,
 ) -> RandomShockMap:
     """
-    Generate reusable random arrays keyed by event ID.
+    Generate reproducible shocks keyed by event ID.
 
-    The same seed and event ID produce the same shocks even when
-    unrelated events are added or reordered. Pass the returned map
-    to multiple simulations to compare scenarios on common draws.
+    Correlation zero preserves the independent-shock model. Positive
+    correlation uses a Gaussian common factor to introduce dependence
+    between events while preserving the uniform marginal distributions.
+
+    Adverse latent values correspond to less reliable inflows, longer
+    delays, and larger outflow uplifts.
     """
     if simulations < 1:
         raise ValueError("simulations must be at least 1")
 
     if max_inflow_delay_days < 0:
-        raise ValueError(
-            "max_inflow_delay_days must be non-negative"
-        )
+        raise ValueError("max_inflow_delay_days must be non-negative")
 
     if (
         not np.isfinite(max_outflow_uplift)
@@ -73,30 +117,83 @@ def generate_random_shocks(
             "max_outflow_uplift must be finite and non-negative"
         )
 
+    if (
+        not np.isfinite(shock_correlation)
+        or not 0.0 <= shock_correlation <= 1.0
+    ):
+        raise ValueError("shock_correlation must be between 0 and 1")
+
     keys = _event_keys(events)
     shocks: RandomShockMap = {}
 
-    for key in keys:
-        digest = blake2b(
-            f"{seed}:{key}".encode("utf-8"),
-            digest_size=8,
-        ).digest()
-        event_seed = int.from_bytes(digest, "little")
-        rng = np.random.default_rng(event_seed)
+    if shock_correlation == 0.0:
+        # Preserve the original independent-shock behavior.
+        for key in keys:
+            rng = np.random.default_rng(_seed_for(seed, key))
 
-        shocks[key] = {
-            "clear_uniform": rng.random(simulations),
-            "delay_days": rng.integers(
-                0,
-                max_inflow_delay_days + 1,
-                size=simulations,
-            ),
-            "outflow_uplift": rng.uniform(
-                0.0,
-                max_outflow_uplift,
-                size=simulations,
-            ),
-        }
+            shocks[key] = {
+                "clear_uniform": rng.random(simulations),
+                "delay_days": rng.integers(
+                    0,
+                    max_inflow_delay_days + 1,
+                    size=simulations,
+                ),
+                "outflow_uplift": rng.uniform(
+                    0.0,
+                    max_outflow_uplift,
+                    size=simulations,
+                ),
+            }
+
+        return shocks
+
+    # A common latent factor shared by every event and shock type.
+    common_rng = np.random.default_rng(
+        _seed_for(seed, "systemic_common_factor")
+    )
+    common_factor = common_rng.standard_normal(simulations)
+
+    common_weight = np.sqrt(shock_correlation)
+    individual_weight = np.sqrt(1.0 - shock_correlation)
+
+    for key in keys:
+        event_shocks = {}
+
+        for shock_name in (
+            "clear_uniform",
+            "delay_days",
+            "outflow_uplift",
+        ):
+            rng = np.random.default_rng(
+                _seed_for(seed, f"{key}:{shock_name}")
+            )
+            individual_factor = rng.standard_normal(simulations)
+
+            latent = (
+                common_weight * common_factor
+                + individual_weight * individual_factor
+            )
+            uniform_values = _normal_to_uniform(latent)
+
+            if shock_name == "clear_uniform":
+                event_shocks[shock_name] = uniform_values
+
+            elif shock_name == "delay_days":
+                delays = np.floor(
+                    uniform_values * (max_inflow_delay_days + 1)
+                ).astype(int)
+
+                event_shocks[shock_name] = np.minimum(
+                    delays,
+                    max_inflow_delay_days,
+                )
+
+            else:
+                event_shocks[shock_name] = (
+                    uniform_values * max_outflow_uplift
+                )
+
+        shocks[key] = event_shocks
 
     return shocks
 
@@ -113,9 +210,9 @@ def simulate_cashflows(
     max_inflow_delay_days: int = 3,
     max_outflow_uplift: float = 0.15,
     random_shocks: RandomShockMap | None = None,
+    shock_correlation: float = 0.0,
 ) -> dict:
-    """Simulate cash balances using explicit event arrival times."""
-
+    """Simulate cash balances and calculate downside risk metrics."""
     if not np.isfinite(starting_balance):
         raise ValueError("starting_balance must be finite")
 
@@ -134,9 +231,7 @@ def simulate_cashflows(
         )
 
     if max_inflow_delay_days < 0:
-        raise ValueError(
-            "max_inflow_delay_days must be non-negative"
-        )
+        raise ValueError("max_inflow_delay_days must be non-negative")
 
     if (
         not np.isfinite(max_outflow_uplift)
@@ -145,6 +240,12 @@ def simulate_cashflows(
         raise ValueError(
             "max_outflow_uplift must be finite and non-negative"
         )
+
+    if (
+        not np.isfinite(shock_correlation)
+        or not 0.0 <= shock_correlation <= 1.0
+    ):
+        raise ValueError("shock_correlation must be between 0 and 1")
 
     for event in events:
         if event.day < 0:
@@ -169,9 +270,11 @@ def simulate_cashflows(
             seed=seed,
             max_inflow_delay_days=max_inflow_delay_days,
             max_outflow_uplift=max_outflow_uplift,
+            shock_correlation=shock_correlation,
         )
 
-    # Validate all required shock arrays before starting the simulation.
+    # Explicitly supplied shocks take precedence. Generate them with
+    # the desired correlation setting when constructing custom scenarios.
     for key in keys:
         if key not in random_shocks:
             raise ValueError(f"Missing random shocks for event: {key}")
@@ -183,32 +286,57 @@ def simulate_cashflows(
         ):
             values = random_shocks[key].get(shock_name)
 
-            if values is None or np.asarray(values).shape != (simulations,):
+            if (
+                values is None
+                or np.asarray(values).shape != (simulations,)
+            ):
                 raise ValueError(
                     f"Invalid {shock_name} array for event {key!r}"
                 )
 
-    # Precompute each event's clearance and arrival day once.
+            if not np.all(np.isfinite(values)):
+                raise ValueError(
+                    f"Non-finite {shock_name} values for event {key!r}"
+                )
+
     prepared_events = []
 
     for event, key in zip(events, keys):
         shock = random_shocks[key]
 
         if event.kind == "inflow":
-            clears = (
-                np.asarray(shock["clear_uniform"])
-                < inflow_clear_probability
+            clear_uniform = np.asarray(
+                shock["clear_uniform"], dtype=float
             )
-            delays = np.asarray(shock["delay_days"], dtype=int)
+            delays = np.asarray(
+                shock["delay_days"], dtype=int
+            )
+
+            if np.any((clear_uniform < 0) | (clear_uniform > 1)):
+                raise ValueError(
+                    "clear_uniform values must be in [0, 1]"
+                )
+
+            if np.any(delays < 0):
+                raise ValueError("Delay values must be non-negative")
+
+            clears = clear_uniform < inflow_clear_probability
             arrival_days = event.day + delays
 
             prepared_events.append(
                 (event, clears, arrival_days, None)
             )
+
         else:
             uplift = np.asarray(
                 shock["outflow_uplift"], dtype=float
             )
+
+            if np.any(uplift < 0):
+                raise ValueError(
+                    f"Invalid outflow uplift values for event {key!r}"
+                )
+
             prepared_events.append(
                 (event, None, None, uplift)
             )
@@ -219,9 +347,9 @@ def simulate_cashflows(
     minimum_balances = balances.copy()
     daily_balances = []
 
-    # Process today (day zero) and each subsequent day.
+    # Process day zero and each subsequent day.
+    # Inflows clear before outflows on the same day.
     for day in range(horizon_days + 1):
-        # Inflows clear before outflows on the same day.
         for event, clears, arrival_days, _ in prepared_events:
             if event.kind != "inflow":
                 continue
@@ -233,7 +361,9 @@ def simulate_cashflows(
             )
 
             balances += np.where(
-                arrives_today, event.amount, 0.0
+                arrives_today,
+                event.amount,
+                0.0,
             )
 
         for event, _, _, uplift in prepared_events:
@@ -243,38 +373,150 @@ def simulate_cashflows(
             balances -= event.amount * (1.0 + uplift)
 
         minimum_balances = np.minimum(
-            minimum_balances, balances
+            minimum_balances,
+            balances,
         )
         daily_balances.append(balances.copy())
 
     ending_balances = balances
-
-    # Vectorized first-breach calculation: no Python loop per path.
     daily_matrix = np.stack(daily_balances, axis=0)
+
     breached = daily_matrix < safety_buffer
     ever_breached = breached.any(axis=0)
 
     first_breach_days = np.argmax(breached, axis=0)
     breach_times = first_breach_days[ever_breached]
 
+    # Phase 3.4: breach duration and severity.
+    # Duration counts daily observations below the buffer, including day 0.
+    breach_duration_days = np.sum(breached, axis=0)
+
+    # Longest consecutive run of daily observations below the buffer.
+    longest_breach_duration_days = np.zeros(
+        simulations,
+        dtype=int,
+    )
+    current_breach_run = np.zeros(
+        simulations,
+        dtype=int,
+    )
+
+    for day_breached in breached:
+        current_breach_run = np.where(
+            day_breached,
+            current_breach_run + 1,
+            0,
+        )
+        longest_breach_duration_days = np.maximum(
+            longest_breach_duration_days,
+            current_breach_run,
+        )
+
+    # Dollar deficit relative to the safety buffer on each daily observation.
+    buffer_deficits = np.maximum(
+        safety_buffer - daily_matrix,
+        0.0,
+    )
+
+    # Cumulative deficit is expressed in dollar-days.
+    cumulative_buffer_deficit = np.sum(
+        buffer_deficits,
+        axis=0,
+    )
+
+    maximum_buffer_deficit = np.max(
+        buffer_deficits,
+        axis=0,
+    )
+
+    if np.any(ever_breached):
+        breached_durations = breach_duration_days[ever_breached]
+        breached_longest_durations = (
+            longest_breach_duration_days[ever_breached]
+        )
+        breached_cumulative_deficits = (
+            cumulative_buffer_deficit[ever_breached]
+        )
+        breached_maximum_deficits = (
+            maximum_buffer_deficit[ever_breached]
+        )
+
+        breach_severity = {
+            "expected_breach_duration_days_if_breached": float(
+                np.mean(breached_durations)
+            ),
+            "p95_breach_duration_days_if_breached": float(
+                np.percentile(breached_durations, 95)
+            ),
+            "expected_longest_breach_run_days_if_breached": float(
+                np.mean(breached_longest_durations)
+            ),
+            "expected_cumulative_buffer_deficit_if_breached": float(
+                np.mean(breached_cumulative_deficits)
+            ),
+            "p95_cumulative_buffer_deficit_if_breached": float(
+                np.percentile(breached_cumulative_deficits, 95)
+            ),
+            "expected_max_buffer_deficit_if_breached": float(
+                np.mean(breached_maximum_deficits)
+            ),
+            "p95_max_buffer_deficit_if_breached": float(
+                np.percentile(breached_maximum_deficits, 95)
+            ),
+        }
+
+    else:
+        breach_severity = {
+            "expected_breach_duration_days_if_breached": None,
+            "p95_breach_duration_days_if_breached": None,
+            "expected_longest_breach_run_days_if_breached": None,
+            "expected_cumulative_buffer_deficit_if_breached": None,
+            "p95_cumulative_buffer_deficit_if_breached": None,
+            "expected_max_buffer_deficit_if_breached": None,
+            "p95_max_buffer_deficit_if_breached": None,
+        }
+
+    ending_balance_p05 = float(
+        np.percentile(ending_balances, 5)
+    )
+    ending_balance_median = float(
+        np.percentile(ending_balances, 50)
+    )
+    ending_balance_p95 = float(
+        np.percentile(ending_balances, 95)
+    )
+
+    shortfall_paths = minimum_balances < 0
+
+    expected_shortfall_severity = (
+        float(np.mean(-minimum_balances[shortfall_paths]))
+        if np.any(shortfall_paths)
+        else None
+    )
+
+    daily_balance_percentiles = {}
+
+    for day in range(horizon_days + 1):
+        day_balances = daily_matrix[day]
+
+        daily_balance_percentiles[day] = {
+            "p05": float(np.percentile(day_balances, 5)),
+            "p50": float(np.percentile(day_balances, 50)),
+            "p95": float(np.percentile(day_balances, 95)),
+        }
+
     return {
         "simulations": simulations,
         "horizon_days": horizon_days,
         "shortfall_probability": float(
-            np.mean(minimum_balances < 0)
+            np.mean(shortfall_paths)
         ),
         "safety_buffer_breach_probability": float(
-            np.mean(minimum_balances < safety_buffer)
+            np.mean(ever_breached)
         ),
-        "ending_balance_p05": float(
-            np.percentile(ending_balances, 5)
-        ),
-        "ending_balance_median": float(
-            np.percentile(ending_balances, 50)
-        ),
-        "ending_balance_p95": float(
-            np.percentile(ending_balances, 95)
-        ),
+        "ending_balance_p05": ending_balance_p05,
+        "ending_balance_median": ending_balance_median,
+        "ending_balance_p95": ending_balance_p95,
         "minimum_balance_p05": float(
             np.percentile(minimum_balances, 5)
         ),
@@ -284,6 +526,28 @@ def simulate_cashflows(
         "expected_ending_balance": float(
             np.mean(ending_balances)
         ),
+        "risk_metrics": {
+            "confidence_level": RISK_CONFIDENCE_LEVEL,
+            "ending_balance_var_95": ending_balance_p05,
+            "ending_balance_cvar_95": _lower_tail_mean(
+                ending_balances,
+                TAIL_PROBABILITY,
+            ),
+            "minimum_balance_var_95": float(
+                np.percentile(minimum_balances, 5)
+            ),
+            "minimum_balance_cvar_95": _lower_tail_mean(
+                minimum_balances,
+                TAIL_PROBABILITY,
+            ),
+            "expected_shortfall_severity": (
+                expected_shortfall_severity
+            ),
+            "shortfall_path_count": int(
+                np.sum(shortfall_paths)
+            ),
+        },
+        "daily_balance_percentiles": daily_balance_percentiles,
         "probability_of_breach_by_day": {
             day: float(np.mean(breached[day]))
             for day in range(horizon_days + 1)
@@ -296,12 +560,14 @@ def simulate_cashflows(
                 else None
             ),
         },
+        "breach_severity": breach_severity,
         "assumptions": {
             "starting_balance": float(starting_balance),
             "safety_buffer": float(safety_buffer),
             "inflow_clear_probability": inflow_clear_probability,
             "max_inflow_delay_days": max_inflow_delay_days,
             "max_outflow_uplift": max_outflow_uplift,
+            "shock_correlation": shock_correlation,
             "seed": seed,
         },
     }

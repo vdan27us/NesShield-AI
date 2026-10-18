@@ -135,3 +135,26 @@ def test_what_if_rejects_invalid_request():
     )
 
     assert response.status_code == 422
+
+
+def test_stress_test_endpoint_validates_simulation_count():
+    response = client.get("/api/stress-test?simulations=10")
+    assert response.status_code == 422
+
+
+def test_risk_attribution_endpoint_validates_simulation_count():
+    response = client.get("/api/risk-attribution?simulations=10")
+    assert response.status_code == 422
+
+
+def test_stress_test_endpoint_validates_correlation():
+    response = client.get("/api/stress-test?shock_correlation=1.5")
+    assert response.status_code == 422
+
+
+def test_risk_attribution_endpoint_validates_correlation():
+    response = client.get(
+        "/api/risk-attribution?shock_correlation=-0.1"
+    )
+    assert response.status_code == 422
+

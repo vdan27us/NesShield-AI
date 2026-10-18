@@ -1,32 +1,46 @@
 
+from datetime import date, timedelta
 from pathlib import Path
-
 import logging
+from typing import Any
 
 import joblib
 import pandas as pd
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
+from backend.data.ledger import build_ledger
 from backend.data.nessie_client import NessieClient
 from backend.quant.cashflow import project_cashflow
 from backend.quant.monte_carlo import run_monte_carlo
-
+from backend.quant.risk_attribution import run_risk_attribution
+from backend.quant.simulation_engine import SimulationEvent
+from backend.quant.stress_testing import run_stress_tests
 from backend.services.gemini_briefing import generate_financial_briefing
-
-from pydantic import BaseModel, Field
 from backend.services.what_if import run_what_if_simulation
+
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "ml" / "risk_model.joblib"
+
+HORIZON_DAYS = 7
+DEFAULT_SIMULATIONS = 2_000
+SAFETY_BUFFER = 5_000.0
+RANDOM_SEED = 42
+DEPOSIT_CLEAR_PROBABILITY = 0.70
+MAX_DEPOSIT_DELAY_DAYS = 3
+MAX_OUTFLOW_UPLIFT = 0.15
+
 
 app = FastAPI(
     title="Nesshield AI API",
     description=(
         "Predictive cash-flow forecasting, Monte Carlo simulations, "
-        "and ML-based scenario risk assessment."
+        "stress testing, transaction-level risk attribution, and "
+        "ML-based scenario risk assessment."
     ),
-    version="0.2.0",
+    version="0.3.0",
 )
 
 app.add_middleware(
@@ -53,6 +67,42 @@ def get_account_data():
         raise ValueError("Nessie returned no account.")
 
     return client, account
+
+
+def get_pending_simulation_context():
+    """Build the same seven-day pending-event view for risk endpoints."""
+    client, account = get_account_data()
+    deposits = client.get_deposits()
+    withdrawals = client.get_withdrawals()
+
+    today = date.today()
+    end_date = today + timedelta(days=HORIZON_DAYS)
+
+    ledger = build_ledger(
+        deposits=deposits,
+        withdrawals=withdrawals,
+        today=today,
+    )
+
+    events = []
+
+    for item in ledger:
+        if item.status != "pending":
+            continue
+
+        if item.effective_date > end_date:
+            continue
+
+        events.append(
+            SimulationEvent(
+                day=max(0, (item.effective_date - today).days),
+                kind=item.kind,
+                amount=float(item.amount),
+                event_id=item.event_id,
+            )
+        )
+
+    return account, events
 
 
 @app.get("/api/health")
@@ -84,7 +134,7 @@ def account():
 @app.get("/api/forecast")
 def forecast():
     try:
-        results = project_cashflow(days=7)
+        results = project_cashflow(days=HORIZON_DAYS)
         return {"forecast": results}
     except Exception as exc:
         raise HTTPException(
@@ -105,12 +155,101 @@ def risk():
         ) from exc
 
 
+@app.get("/api/stress-test")
+def stress_test(
+    simulations: int = Query(
+        default=DEFAULT_SIMULATIONS,
+        ge=100,
+        le=10_000,
+    ),
+    shock_correlation: float = Query(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+    ),
+):
+    """Run predefined adverse scenarios against pending Nessie transactions."""
+    try:
+        account_data, events = get_pending_simulation_context()
+
+        results = run_stress_tests(
+            starting_balance=float(account_data["balance"]),
+            events=events,
+            horizon_days=HORIZON_DAYS,
+            simulations=simulations,
+            safety_buffer=SAFETY_BUFFER,
+            seed=RANDOM_SEED,
+            inflow_clear_probability=DEPOSIT_CLEAR_PROBABILITY,
+            max_inflow_delay_days=MAX_DEPOSIT_DELAY_DAYS,
+            max_outflow_uplift=MAX_OUTFLOW_UPLIFT,
+            shock_correlation=shock_correlation,
+        )
+
+        return {
+            "stress_tests": results,
+            "data_source": "Nessie sandbox + stress-testing engine",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logging.exception("Stress testing failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to run stress tests. Check backend logs.",
+        ) from exc
+
+
+@app.get("/api/risk-attribution")
+def risk_attribution(
+    simulations: int = Query(
+        default=DEFAULT_SIMULATIONS,
+        ge=100,
+        le=10_000,
+    ),
+    shock_correlation: float = Query(
+        default=0.0,
+        ge=0.0,
+        le=1.0,
+    ),
+):
+    """Rank pending transactions by their modeled contribution to liquidity risk."""
+    try:
+        account_data, events = get_pending_simulation_context()
+
+        results = run_risk_attribution(
+            starting_balance=float(account_data["balance"]),
+            events=events,
+            horizon_days=HORIZON_DAYS,
+            simulations=simulations,
+            safety_buffer=SAFETY_BUFFER,
+            seed=RANDOM_SEED,
+            inflow_clear_probability=DEPOSIT_CLEAR_PROBABILITY,
+            max_inflow_delay_days=MAX_DEPOSIT_DELAY_DAYS,
+            max_outflow_uplift=MAX_OUTFLOW_UPLIFT,
+            shock_correlation=shock_correlation,
+        )
+
+        return {
+            "risk_attribution": results,
+            "data_source": "Nessie sandbox + counterfactual risk attribution",
+        }
+
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logging.exception("Risk attribution failed")
+        raise HTTPException(
+            status_code=500,
+            detail="Unable to calculate risk attribution. Check backend logs.",
+        ) from exc
+
+
 @app.get("/api/ml-risk")
 def ml_risk():
     """
     Score a scenario using the existing Random Forest model.
 
-    IMPORTANT:
     The model was trained on synthetic scenarios. Its score is not
     a calibrated real-world probability of business failure.
     """
@@ -126,19 +265,15 @@ def ml_risk():
         features = bundle["features"]
 
         client, account_data = get_account_data()
-
         deposits = client.get_deposits()
         withdrawals = client.get_withdrawals()
 
         pending_deposits = [
-            item
-            for item in deposits
+            item for item in deposits
             if item.get("status") == "pending"
         ]
-
         pending_withdrawals = [
-            item
-            for item in withdrawals
+            item for item in withdrawals
             if item.get("status") == "pending"
         ]
 
@@ -146,7 +281,6 @@ def ml_risk():
             float(item.get("amount", 0))
             for item in pending_deposits
         )
-
         scheduled_outflows = sum(
             float(item.get("amount", 0))
             for item in pending_withdrawals
@@ -161,7 +295,6 @@ def ml_risk():
             "other_expenses": 0.0,
         }
 
-        # Match the feature names and order used during training.
         input_data = pd.DataFrame(
             [{name: scenario[name] for name in features}],
             columns=features,
@@ -169,7 +302,6 @@ def ml_risk():
 
         prediction = int(model.predict(input_data)[0])
         probabilities = model.predict_proba(input_data)[0]
-
         classes = list(model.classes_)
         positive_class_index = (
             classes.index(1) if 1 in classes else None
@@ -194,7 +326,9 @@ def ml_risk():
                 "Model score for the synthetic shortfall class; "
                 "not a calibrated real-world probability."
             ),
-            "data_source": "Nessie sandbox account + synthetic-trained model",
+            "data_source": (
+                "Nessie sandbox account + synthetic-trained model"
+            ),
             "scenario": scenario,
             "limitations": [
                 "The model was trained on synthetic data.",
@@ -213,13 +347,12 @@ def ml_risk():
         ) from exc
 
 
-    
 @app.get("/api/briefing")
 def briefing():
     try:
         client, account_data = get_account_data()
 
-        forecast_data = project_cashflow(days=7)
+        forecast_data = project_cashflow(days=HORIZON_DAYS)
         monte_carlo_data = run_monte_carlo()
 
         deposits = client.get_deposits()
@@ -267,7 +400,9 @@ def briefing():
         return {
             "briefing": text,
             "generated_by": "Gemini",
-            "data_source": "Nessie sandbox + Cash-flow engine + Monte Carlo",
+            "data_source": (
+                "Nessie sandbox + Cash-flow engine + Monte Carlo"
+            ),
         }
 
     except Exception as exc:
@@ -330,7 +465,6 @@ def what_if(request: WhatIfRequest):
             ),
         }
 
-        # Gemini explains the results; Python calculates the metrics.
         try:
             briefing_text = generate_financial_briefing(financial_data)
         except Exception:

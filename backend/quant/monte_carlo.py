@@ -1,6 +1,8 @@
 
 """Monte Carlo risk analysis using the shared simulation engine."""
+
 from datetime import date, timedelta
+from typing import Any
 
 from backend.data.ledger import build_ledger
 from backend.data.nessie_client import NessieClient
@@ -15,15 +17,22 @@ HORIZON_DAYS = 7
 DEPOSIT_CLEAR_PROBABILITY = 0.70
 MAX_DEPOSIT_DELAY_DAYS = 3
 MAX_OUTFLOW_UPLIFT = 0.15
-SAFETY_BUFFER = 5_000
+SAFETY_BUFFER = 5_000.0
 RANDOM_SEED = 42
 
+# Zero preserves independent event shocks. Increase only when justified
+# by an explicit modeling assumption or calibration.
+SHOCK_CORRELATION = 0.0
 
-def run_monte_carlo():
-    """Run risk analysis against pending Nessie transactions."""
+
+def run_monte_carlo() -> dict[str, Any]:
+    """Run Monte Carlo liquidity-risk analysis on pending Nessie transactions."""
     client = NessieClient()
 
     account = client.get_account()
+    if not account:
+        raise ValueError("Nessie returned no account.")
+
     deposits = client.get_deposits()
     withdrawals = client.get_withdrawals()
 
@@ -37,28 +46,23 @@ def run_monte_carlo():
         today=today,
     )
 
-    events = []
+    events: list[SimulationEvent] = []
 
     for item in ledger:
-        # Preserve the existing pending-transaction scope.
         if item.status != "pending":
             continue
 
-        # Include overdue pending transactions as due today.
-        # Ignore transactions beyond the simulation horizon.
         if item.effective_date > end_date:
             continue
 
-        event_day = max(
-            0,
-            (item.effective_date - today).days,
-        )
+        # Treat overdue pending transactions as occurring on day zero.
+        event_day = max(0, (item.effective_date - today).days)
 
         events.append(
             SimulationEvent(
                 day=event_day,
                 kind=item.kind,
-                amount=item.amount,
+                amount=float(item.amount),
                 event_id=item.event_id,
             )
         )
@@ -73,23 +77,20 @@ def run_monte_carlo():
         inflow_clear_probability=DEPOSIT_CLEAR_PROBABILITY,
         max_inflow_delay_days=MAX_DEPOSIT_DELAY_DAYS,
         max_outflow_uplift=MAX_OUTFLOW_UPLIFT,
+        shock_correlation=SHOCK_CORRELATION,
     )
 
-    # Preserve existing API response fields for the frontend.
     return {
         "starting_balance": round(starting_balance, 2),
         "simulations": result["simulations"],
         "horizon_days": result["horizon_days"],
         "assumptions": {
-            "deposit_clear_probability": (
-                DEPOSIT_CLEAR_PROBABILITY
-            ),
-            "max_deposit_delay_days": (
-                MAX_DEPOSIT_DELAY_DAYS
-            ),
+            "deposit_clear_probability": DEPOSIT_CLEAR_PROBABILITY,
+            "max_deposit_delay_days": MAX_DEPOSIT_DELAY_DAYS,
             "max_outflow_uplift": MAX_OUTFLOW_UPLIFT,
             "safety_buffer": SAFETY_BUFFER,
             "random_seed": RANDOM_SEED,
+            "shock_correlation": SHOCK_CORRELATION,
         },
         "shortfall_probability": round(
             result["shortfall_probability"], 4
@@ -109,26 +110,27 @@ def run_monte_carlo():
         "minimum_balance_p05": round(
             result["minimum_balance_p05"], 2
         ),
-        # Additional diagnostics for later dashboard improvements.
         "expected_minimum_balance": round(
             result["expected_minimum_balance"], 2
         ),
         "expected_ending_balance": round(
             result["expected_ending_balance"], 2
         ),
-        "probability_of_breach_by_day": result[
-            "probability_of_breach_by_day"
-        ],
-        "time_to_first_buffer_breach": result[
-            "time_to_first_buffer_breach"
-        ],
+        "probability_of_breach_by_day": (
+            result["probability_of_breach_by_day"]
+        ),
+        "time_to_first_buffer_breach": (
+            result["time_to_first_buffer_breach"]
+        ),
+        "risk_metrics": result["risk_metrics"],
+        "daily_balance_percentiles": (
+            result["daily_balance_percentiles"]
+        ),
+        "breach_severity": result["breach_severity"],
     }
 
 
 if __name__ == "__main__":
-    results = run_monte_carlo()
+    import json
 
-    print("\n=== Nesshield AI: Monte Carlo Risk Report ===")
-
-    for key, value in results.items():
-        print(f"{key}: {value}")
+    print(json.dumps(run_monte_carlo(), indent=2))
