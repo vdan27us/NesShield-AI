@@ -84,6 +84,16 @@ def run_monte_carlo() -> dict[str, Any]:
         "starting_balance": round(starting_balance, 2),
         "simulations": result["simulations"],
         "horizon_days": result["horizon_days"],
+        "model_metadata": {
+            "model_type": "assumption_based_monte_carlo",
+            "payment_timing_calibration": "unavailable",
+            "verified_settlement_history_available": False,
+            "interpretation": (
+                "Risk estimates are scenario-based and depend on "
+                "configured assumptions; they are not validated "
+                "real-world predictions."
+            ),
+        },
         "assumptions": {
             "deposit_clear_probability": DEPOSIT_CLEAR_PROBABILITY,
             "max_deposit_delay_days": MAX_DEPOSIT_DELAY_DAYS,
