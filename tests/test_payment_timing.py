@@ -6,6 +6,10 @@ from backend.ml.payment_timing import (
     get_timing_features,
     prepare_timing_dataset,
 )
+from backend.ml.payment_timing_model import (
+    generate_synthetic_payer_history,
+    train_and_evaluate,
+)
 
 
 def test_calculates_actual_settlement_delay():
@@ -90,3 +94,22 @@ def test_baseline_uses_median_of_verified_delays():
     assert result["status"] == "available"
     assert result["estimated_delay_days"] == 2.0
     assert result["observations"] == 3
+
+
+def test_synthetic_history_has_repeat_payers_and_settlement_labels():
+    data = generate_synthetic_payer_history(
+        payer_count=4, transactions_per_payer=5, seed=9
+    )
+    assert data["payer_id"].nunique() == 4
+    assert len(data) == 20
+    assert data["synthetic_label"].all()
+    assert {"scheduled_date", "actual_settlement_date"}.issubset(data.columns)
+
+
+def test_gradient_boosting_evaluation_is_held_out_and_reports_baselines():
+    result = train_and_evaluate(save=False)
+    assert result["held_out_payers"] > 0
+    assert result["gradient_boosting_mae_days"] >= 0
+    assert result["median_baseline_mae_days"] >= 0
+    assert result["calibrated_over_3_day_delay_brier"] < result["prevalence_baseline_brier"]
+    assert "synthetic" in result["dataset"]

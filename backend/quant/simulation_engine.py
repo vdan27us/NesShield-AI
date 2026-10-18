@@ -26,6 +26,9 @@ class SimulationEvent:
     kind: EventKind
     amount: float
     event_id: str = ""
+    clear_probability: float | None = None
+    predicted_delay_days: int = 0
+    late_probability: float | None = None
 
 
 def _event_keys(events: list[SimulationEvent]) -> list[str]:
@@ -92,6 +95,9 @@ def generate_random_shocks(
     max_inflow_delay_days: int = 3,
     max_outflow_uplift: float = 0.15,
     shock_correlation: float = 0.0,
+    horizon_days: int = 0,
+    unexpected_expense_probability: float = 0.0,
+    max_unexpected_expense: float = 0.0,
 ) -> RandomShockMap:
     """
     Generate reproducible shocks keyed by event ID.
@@ -125,6 +131,35 @@ def generate_random_shocks(
 
     keys = _event_keys(events)
     shocks: RandomShockMap = {}
+    common_rng = np.random.default_rng(
+        _seed_for(seed, "systemic_common_factor")
+    )
+    common_factor = common_rng.standard_normal(simulations)
+
+    if not 0 <= unexpected_expense_probability <= 1:
+        raise ValueError("unexpected_expense_probability must be between 0 and 1")
+    if not np.isfinite(max_unexpected_expense) or max_unexpected_expense < 0:
+        raise ValueError("max_unexpected_expense must be finite and non-negative")
+
+    def add_unexpected_expenses() -> None:
+        if unexpected_expense_probability == 0 or max_unexpected_expense == 0:
+            return
+        rng = np.random.default_rng(_seed_for(seed, "unexpected_expenses"))
+        individual = rng.standard_normal((horizon_days + 1, simulations))
+        latent = (
+            np.sqrt(shock_correlation) * common_factor[None, :]
+            + np.sqrt(1.0 - shock_correlation) * individual
+        )
+        occurrence_uniform = _normal_to_uniform(latent.ravel()).reshape(
+            horizon_days + 1, simulations
+        )
+        shocks["__unexpected_expenses__"] = {
+            "occurrence_uniform": occurrence_uniform,
+            "amount": rng.uniform(
+                0.0, max_unexpected_expense,
+                size=(horizon_days + 1, simulations),
+            ),
+        }
 
     if shock_correlation == 0.0:
         # Preserve the original independent-shock behavior.
@@ -145,14 +180,10 @@ def generate_random_shocks(
                 ),
             }
 
+        add_unexpected_expenses()
         return shocks
 
     # A common latent factor shared by every event and shock type.
-    common_rng = np.random.default_rng(
-        _seed_for(seed, "systemic_common_factor")
-    )
-    common_factor = common_rng.standard_normal(simulations)
-
     common_weight = np.sqrt(shock_correlation)
     individual_weight = np.sqrt(1.0 - shock_correlation)
 
@@ -195,6 +226,7 @@ def generate_random_shocks(
 
         shocks[key] = event_shocks
 
+    add_unexpected_expenses()
     return shocks
 
 
@@ -211,6 +243,8 @@ def simulate_cashflows(
     max_outflow_uplift: float = 0.15,
     random_shocks: RandomShockMap | None = None,
     shock_correlation: float = 0.0,
+    unexpected_expense_probability: float = 0.0,
+    max_unexpected_expense: float = 0.0,
 ) -> dict:
     """Simulate cash balances and calculate downside risk metrics."""
     if not np.isfinite(starting_balance):
@@ -260,6 +294,12 @@ def simulate_cashflows(
             raise ValueError(
                 f"Unsupported event kind: {event.kind!r}"
             )
+        if event.clear_probability is not None and not 0 <= event.clear_probability <= 1:
+            raise ValueError("event clear_probability must be between 0 and 1")
+        if event.predicted_delay_days < 0:
+            raise ValueError("event predicted_delay_days must be non-negative")
+        if event.late_probability is not None and not 0 <= event.late_probability <= 1:
+            raise ValueError("event late_probability must be between 0 and 1")
 
     keys = _event_keys(events)
 
@@ -271,6 +311,9 @@ def simulate_cashflows(
             max_inflow_delay_days=max_inflow_delay_days,
             max_outflow_uplift=max_outflow_uplift,
             shock_correlation=shock_correlation,
+            horizon_days=horizon_days,
+            unexpected_expense_probability=unexpected_expense_probability,
+            max_unexpected_expense=max_unexpected_expense,
         )
 
     # Explicitly supplied shocks take precedence. Generate them with
@@ -320,8 +363,21 @@ def simulate_cashflows(
             if np.any(delays < 0):
                 raise ValueError("Delay values must be non-negative")
 
-            clears = clear_uniform < inflow_clear_probability
-            arrival_days = event.day + delays
+            clear_probability = (
+                inflow_clear_probability
+                if event.clear_probability is None
+                else event.clear_probability
+            )
+            clears = clear_uniform < clear_probability
+            late_flags = (
+                clear_uniform < event.late_probability
+                if event.late_probability is not None
+                else np.zeros(simulations, dtype=bool)
+            )
+            arrival_days = (
+                event.day + event.predicted_delay_days + delays
+                + np.where(late_flags, max_inflow_delay_days + 1, 0)
+            )
 
             prepared_events.append(
                 (event, clears, arrival_days, None)
@@ -371,6 +427,14 @@ def simulate_cashflows(
                 continue
 
             balances -= event.amount * (1.0 + uplift)
+
+        expense_shocks = random_shocks.get("__unexpected_expenses__")
+        if expense_shocks is not None:
+            occurs = (
+                expense_shocks["occurrence_uniform"][day]
+                < unexpected_expense_probability
+            )
+            balances -= np.where(occurs, expense_shocks["amount"][day], 0.0)
 
         minimum_balances = np.minimum(
             minimum_balances,
@@ -568,6 +632,8 @@ def simulate_cashflows(
             "max_inflow_delay_days": max_inflow_delay_days,
             "max_outflow_uplift": max_outflow_uplift,
             "shock_correlation": shock_correlation,
+            "unexpected_expense_probability": unexpected_expense_probability,
+            "max_unexpected_expense": max_unexpected_expense,
             "seed": seed,
         },
     }

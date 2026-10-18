@@ -53,13 +53,14 @@ def run_what_if_simulation(
     if simulations < 1:
         raise ValueError("simulations must be at least 1")
 
-    horizon_days = 7
-    payroll_day = 3
+    horizon_days = 14
+    payroll_day = min(3, horizon_days)
 
     # Preserve the existing what-if assumptions.
     deposit_clear_probability = 0.70
     max_random_delay = 3
     max_outflow_uplift = 0.15
+    shock_correlation = 0.35
 
     # Preserve the previous deterministic planning convention:
     # a delay of zero means the deposit is credited on day 1.
@@ -90,6 +91,9 @@ def run_what_if_simulation(
         inflow_clear_probability=deposit_clear_probability,
         max_inflow_delay_days=max_random_delay,
         max_outflow_uplift=max_outflow_uplift,
+        shock_correlation=shock_correlation,
+        unexpected_expense_probability=0.03,
+        max_unexpected_expense=1_000.0,
     )
 
     # Deterministic planning path remains separate from the stochastic
@@ -128,6 +132,9 @@ def run_what_if_simulation(
                     max_random_delay
                 ),
                 "max_outflow_uplift": max_outflow_uplift,
+                "shock_correlation": shock_correlation,
+                "unexpected_expense_probability": 0.03,
+                "max_unexpected_expense": 1_000.0,
                 "safety_buffer": float(safety_buffer),
                 "seed": seed,
             }

@@ -195,6 +195,9 @@ def run_stress_tests(
     inflow_clear_probability: float = 0.70,
     max_inflow_delay_days: int = 3,
     max_outflow_uplift: float = 0.15,
+    shock_correlation: float = 0.0,
+    unexpected_expense_probability: float = 0.0,
+    max_unexpected_expense: float = 0.0,
     scenarios: list[StressScenario] | None = None,
 ) -> dict[str, Any]:
     """
@@ -252,6 +255,10 @@ def run_stress_tests(
         seed=seed,
         max_inflow_delay_days=max_inflow_delay_days,
         max_outflow_uplift=max_outflow_uplift,
+        shock_correlation=shock_correlation,
+        horizon_days=horizon_days,
+        unexpected_expense_probability=unexpected_expense_probability,
+        max_unexpected_expense=max_unexpected_expense,
     )
 
     common_args = {
@@ -263,6 +270,9 @@ def run_stress_tests(
         "inflow_clear_probability": inflow_clear_probability,
         "max_inflow_delay_days": max_inflow_delay_days,
         "max_outflow_uplift": max_outflow_uplift,
+        "shock_correlation": shock_correlation,
+        "unexpected_expense_probability": unexpected_expense_probability,
+        "max_unexpected_expense": max_unexpected_expense,
         "random_shocks": random_shocks,
     }
 
@@ -304,6 +314,7 @@ def run_stress_tests(
             "common_random_numbers": True,
             "random_seed": seed,
             "confidence_level": 0.95,
+            "shock_correlation": shock_correlation,
             "note": (
                 "Stress scenarios are deterministic assumption changes, "
                 "not forecasts of event likelihood. The standard scenarios "

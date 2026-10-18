@@ -71,6 +71,37 @@ def test_certain_inflow_increases_balance_when_it_arrives():
     assert result["expected_minimum_balance"] == pytest.approx(1_000)
 
 
+def test_event_specific_clearing_probability_overrides_global_rate():
+    event = SimulationEvent(0, "inflow", 1_000, "certain-credit", 1.0)
+    result = simulate_cashflows(
+        starting_balance=0, events=[event], horizon_days=0,
+        simulations=100, inflow_clear_probability=0.0,
+        max_inflow_delay_days=0, max_outflow_uplift=0,
+    )
+    assert result["expected_ending_balance"] == pytest.approx(1_000)
+
+
+def test_late_probability_shifts_payment_past_early_horizon():
+    event = SimulationEvent(
+        0, "inflow", 1_000, "late-payment", 1.0, 0, 1.0
+    )
+    result = simulate_cashflows(
+        starting_balance=0, events=[event], horizon_days=3,
+        simulations=100, inflow_clear_probability=0.0,
+        max_inflow_delay_days=3, max_outflow_uplift=0,
+    )
+    assert result["expected_ending_balance"] == 0
+
+
+def test_random_unexpected_expenses_reduce_expected_balance():
+    result = simulate_cashflows(
+        starting_balance=10_000, events=[], horizon_days=2,
+        simulations=1_000, unexpected_expense_probability=1.0,
+        max_unexpected_expense=100,
+    )
+    assert result["expected_ending_balance"] < 10_000
+
+
 def test_simulation_is_reproducible_with_same_seed():
     events = [
         SimulationEvent(0, "inflow", 500, "deposit"),

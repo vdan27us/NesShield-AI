@@ -31,13 +31,13 @@ def test_what_if_preserves_three_value_return_contract():
     assert isinstance(ending_balance, float)
 
 
-def test_what_if_forecast_has_eight_daily_points():
+def test_what_if_forecast_has_fifteen_daily_points():
     _, forecast, _ = run_example()
 
-    assert len(forecast) == 8
+    assert len(forecast) == 15
     assert forecast[0]["label"] == "Today"
     assert forecast[0]["day"] == 0
-    assert forecast[-1]["day"] == 7
+    assert forecast[-1]["day"] == 14
 
 
 def test_what_if_deterministic_forecast_is_correct():
@@ -53,7 +53,7 @@ def test_what_if_deterministic_forecast_is_correct():
     assert forecast[1]["projected_balance"] == 10_000
     assert forecast[2]["projected_balance"] == 12_000
     assert forecast[3]["projected_balance"] == 9_000
-    assert forecast[7]["projected_balance"] == 9_000
+    assert forecast[14]["projected_balance"] == 9_000
     assert ending_balance == 9_000.0
 
 
@@ -85,7 +85,7 @@ def test_what_if_exposes_risk_metrics():
 
     assert expected_keys.issubset(risk_metrics.keys())
     assert risk_metrics["simulations"] == 500
-    assert risk_metrics["horizon_days"] == 7
+    assert risk_metrics["horizon_days"] == 14
 
 
 @pytest.mark.parametrize(

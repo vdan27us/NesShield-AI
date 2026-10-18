@@ -10,10 +10,11 @@ from backend.quant.simulation_engine import (
     SimulationEvent,
     simulate_cashflows,
 )
+from backend.ml.payment_timing_model import predict_synthetic_timing
 
 
 SIMULATIONS = 10_000
-HORIZON_DAYS = 7
+HORIZON_DAYS = 14
 DEPOSIT_CLEAR_PROBABILITY = 0.70
 MAX_DEPOSIT_DELAY_DAYS = 3
 MAX_OUTFLOW_UPLIFT = 0.15
@@ -22,19 +23,24 @@ RANDOM_SEED = 42
 
 # Zero preserves independent event shocks. Increase only when justified
 # by an explicit modeling assumption or calibration.
-SHOCK_CORRELATION = 0.0
+SHOCK_CORRELATION = 0.35
+UNEXPECTED_EXPENSE_PROBABILITY = 0.03
+MAX_UNEXPECTED_EXPENSE = 1_000.0
 
 
-def run_monte_carlo() -> dict[str, Any]:
+def run_monte_carlo(snapshot: dict[str, Any] | None = None) -> dict[str, Any]:
     """Run Monte Carlo liquidity-risk analysis on pending Nessie transactions."""
-    client = NessieClient()
-
-    account = client.get_account()
+    if snapshot is None:
+        client = NessieClient()
+        account = client.get_account()
+        deposits = client.get_deposits()
+        withdrawals = client.get_withdrawals()
+    else:
+        account = snapshot["account"]
+        deposits = snapshot["deposits"]
+        withdrawals = snapshot["withdrawals"]
     if not account:
         raise ValueError("Nessie returned no account.")
-
-    deposits = client.get_deposits()
-    withdrawals = client.get_withdrawals()
 
     starting_balance = float(account["balance"])
     today = date.today()
@@ -49,7 +55,7 @@ def run_monte_carlo() -> dict[str, Any]:
     events: list[SimulationEvent] = []
 
     for item in ledger:
-        if item.status != "pending":
+        if item.status not in {"pending", "scheduled"}:
             continue
 
         if item.effective_date > end_date:
@@ -58,14 +64,17 @@ def run_monte_carlo() -> dict[str, Any]:
         # Treat overdue pending transactions as occurring on day zero.
         event_day = max(0, (item.effective_date - today).days)
 
-        events.append(
-            SimulationEvent(
-                day=event_day,
-                kind=item.kind,
-                amount=float(item.amount),
-                event_id=item.event_id,
-            )
+        timing = predict_synthetic_timing(
+            amount=float(item.amount), kind=item.kind,
+            weekday=(today + timedelta(days=event_day)).weekday(),
         )
+        events.append(SimulationEvent(
+            day=event_day, kind=item.kind, amount=float(item.amount),
+            event_id=item.event_id,
+            clear_probability=timing["clear_probability"],
+            predicted_delay_days=timing["predicted_delay_days"],
+            late_probability=timing["late_probability"],
+        ))
 
     result = simulate_cashflows(
         starting_balance=starting_balance,
@@ -78,6 +87,8 @@ def run_monte_carlo() -> dict[str, Any]:
         max_inflow_delay_days=MAX_DEPOSIT_DELAY_DAYS,
         max_outflow_uplift=MAX_OUTFLOW_UPLIFT,
         shock_correlation=SHOCK_CORRELATION,
+        unexpected_expense_probability=UNEXPECTED_EXPENSE_PROBABILITY,
+        max_unexpected_expense=MAX_UNEXPECTED_EXPENSE,
     )
 
     return {
@@ -88,6 +99,8 @@ def run_monte_carlo() -> dict[str, Any]:
             "model_type": "assumption_based_monte_carlo",
             "payment_timing_calibration": "unavailable",
             "verified_settlement_history_available": False,
+            "payment_timing_model": "Gradient Boosting trained on synthetic payer histories",
+            "synthetic_model_influences_simulated_event_delay": True,
             "interpretation": (
                 "Risk estimates are scenario-based and depend on "
                 "configured assumptions; they are not validated "
@@ -101,6 +114,10 @@ def run_monte_carlo() -> dict[str, Any]:
             "safety_buffer": SAFETY_BUFFER,
             "random_seed": RANDOM_SEED,
             "shock_correlation": SHOCK_CORRELATION,
+            "unmodeled_event_fallback_clear_probability": DEPOSIT_CLEAR_PROBABILITY,
+            "synthetic_timing_probability_used_when_available": True,
+            "unexpected_expense_probability": UNEXPECTED_EXPENSE_PROBABILITY,
+            "max_unexpected_expense": MAX_UNEXPECTED_EXPENSE,
         },
         "shortfall_probability": round(
             result["shortfall_probability"], 4

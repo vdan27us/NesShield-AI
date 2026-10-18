@@ -61,6 +61,63 @@ def test_risk_endpoint_preserves_response_shape(monkeypatch):
     assert response.json() == {"monte_carlo": fake_risk}
 
 
+def test_decision_endpoint_uses_fourteen_day_common_scenario_setup(monkeypatch):
+    observed = {}
+    monkeypatch.setattr(
+        api, "get_pending_simulation_context",
+        lambda **kwargs: ({"balance": 20_000}, []),
+    )
+
+    def fake_compare(**kwargs):
+        observed.update(kwargs)
+        return {"common_random_scenarios": True}
+
+    monkeypatch.setattr(api, "compare_interventions", fake_compare)
+    response = client.get("/api/decision")
+    assert response.status_code == 200
+    assert response.json()["decision"]["common_random_scenarios"] is True
+    assert observed["horizon_days"] == 14
+    assert observed["simulations"] == api.DEFAULT_SIMULATIONS
+    assert observed["shock_correlation"] == api.SHOCK_CORRELATION
+
+
+def test_briefing_reuses_one_nessie_snapshot(monkeypatch):
+    class FakeClient:
+        deposit_calls = 0
+        withdrawal_calls = 0
+
+        def get_deposits(self):
+            self.deposit_calls += 1
+            return []
+
+        def get_withdrawals(self):
+            self.withdrawal_calls += 1
+            return []
+
+    fake = FakeClient()
+    monkeypatch.setattr(
+        api, "get_account_data",
+        lambda: (fake, {"nickname": "Test", "balance": 10_000}),
+    )
+    snapshots = []
+
+    def fake_forecast(*, days, snapshot):
+        snapshots.append(snapshot)
+        return []
+
+    def fake_monte_carlo(*, snapshot):
+        snapshots.append(snapshot)
+        return {}
+
+    monkeypatch.setattr(api, "project_cashflow", fake_forecast)
+    monkeypatch.setattr(api, "run_monte_carlo", fake_monte_carlo)
+    monkeypatch.setattr(api, "generate_financial_briefing", lambda _: "Ready")
+    response = client.get("/api/briefing")
+    assert response.status_code == 200
+    assert snapshots[0] is snapshots[1]
+    assert fake.deposit_calls == fake.withdrawal_calls == 1
+
+
 def test_what_if_endpoint_preserves_response_shape(monkeypatch):
     fake_account = {
         "nickname": "Test account",
@@ -150,6 +207,23 @@ def test_risk_attribution_endpoint_validates_simulation_count():
 def test_stress_test_endpoint_validates_correlation():
     response = client.get("/api/stress-test?shock_correlation=1.5")
     assert response.status_code == 422
+
+
+def test_stress_test_passes_requested_correlation(monkeypatch):
+    observed = {}
+    monkeypatch.setattr(
+        api, "get_pending_simulation_context",
+        lambda **kwargs: ({"balance": 10_000}, []),
+    )
+
+    def fake_stress(**kwargs):
+        observed.update(kwargs)
+        return {"ok": True}
+
+    monkeypatch.setattr(api, "run_stress_tests", fake_stress)
+    response = client.get("/api/stress-test?shock_correlation=0.65&simulations=100")
+    assert response.status_code == 200
+    assert observed["shock_correlation"] == 0.65
 
 
 def test_risk_attribution_endpoint_validates_correlation():

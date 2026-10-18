@@ -55,6 +55,9 @@ function App() {
   const [paymentTimingError, setPaymentTimingError] = useState("");
   const [decisionData, setDecisionData] = useState(null);
   const [decisionError, setDecisionError] = useState("");
+  const [riskDrivers, setRiskDrivers] = useState(null);
+  const [stressTests, setStressTests] = useState(null);
+  const [quantError, setQuantError] = useState("");
   const [connected, setConnected] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -203,6 +206,21 @@ function App() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    Promise.all([
+      fetch(`${API}/api/risk-attribution?simulations=2000`).then(async (r) => {
+        const d = await r.json(); if (!r.ok) throw new Error(d.detail || "Risk drivers unavailable"); return d.risk_attribution;
+      }),
+      fetch(`${API}/api/stress-test?simulations=2000`).then(async (r) => {
+        const d = await r.json(); if (!r.ok) throw new Error(d.detail || "Stress tests unavailable"); return d.stress_tests;
+      }),
+    ]).then(([drivers, tests]) => {
+      if (!cancelled) { setRiskDrivers(drivers); setStressTests(tests); }
+    }).catch((err) => { if (!cancelled) setQuantError(err.message); });
+    return () => { cancelled = true; };
   }, []);
 
   useEffect(() => {
@@ -805,6 +823,25 @@ function App() {
 
               <div className="ml-scenario-grid">
                 <div>
+                  <span>Rule-based baseline</span>
+                  <strong>{mlRisk.baseline?.prediction === 1 ? "Shortfall" : "No shortfall"}</strong>
+                </div>
+                <div>
+                  <span>Baseline minimum cash</span>
+                  <strong>{money(mlRisk.baseline?.projected_minimum_balance)}</strong>
+                </div>
+                <div>
+                  <span>Model agreement</span>
+                  <strong>{mlRisk.agrees_with_baseline ? "Agrees" : "Differs"}</strong>
+                </div>
+                <div>
+                  <span>Baseline inflow rule</span>
+                  <strong>Credit only by day 2</strong>
+                </div>
+              </div>
+
+              <div className="ml-scenario-grid">
+                <div>
                   <span>Starting balance</span>
                   <strong>{money(mlRisk.scenario?.starting_balance)}</strong>
                 </div>
@@ -841,6 +878,36 @@ function App() {
                 : "ML assessment unavailable. Refresh the dashboard to try again."}
             </p>
           )}
+        </section>
+
+        <section className="panel payment-timing-panel">
+          <div className="panel-header">
+            <div>
+              <h2>Risk Drivers & Stress Tests</h2>
+              <p>Event-level attribution and adverse 14-day scenarios</p>
+            </div>
+            <div className="metric-icon amber"><TrendingDown size={18} /></div>
+          </div>
+          {riskDrivers && <>
+            <div className="whatif-forecast-list">
+              {riskDrivers.risk_drivers?.slice(0, 4).map((driver) => (
+                <div className="whatif-forecast-row" key={driver.event_id}>
+                  <span>{driver.kind} · {driver.event_id} · {money(driver.amount)}</span>
+                  <span>{percentage(driver.safety_buffer_breach_probability_contribution)} breach contribution</span>
+                </div>
+              ))}
+            </div>
+            <div className="whatif-forecast-list">
+              {Object.entries(stressTests?.scenarios || {}).map(([name, result]) => (
+                <div className="whatif-forecast-row" key={name}>
+                  <span>{name.replaceAll("_", " ")}</span>
+                  <span>{percentage(result.metrics?.safety_buffer_breach_probability)} buffer breach</span>
+                </div>
+              ))}
+            </div>
+          </>}
+          {!riskDrivers && <p className="payment-timing-message">{quantError || "Loading risk drivers and stress tests…"}</p>}
+          <p className="whatif-disclaimer">Attribution is one-event-at-a-time and contributions are not additive or causal. Stress scenarios are illustrative assumptions, not likelihood forecasts.</p>
         </section>
 
         <section className="panel payment-timing-panel">
@@ -891,12 +958,31 @@ function App() {
                 </div>
               </div>
 
+              {paymentTiming?.synthetic_model_evaluation && (
+                <div className="ml-scenario-grid payment-timing-grid">
+                  <div>
+                    <span>Gradient Boosting delay MAE · held-out synthetic payers</span>
+                    <strong>{Number(paymentTiming.synthetic_model_evaluation.gradient_boosting_mae_days).toFixed(2)} days</strong>
+                  </div>
+                  <div>
+                    <span>Historical-median baseline MAE</span>
+                    <strong>{Number(paymentTiming.synthetic_model_evaluation.median_baseline_mae_days).toFixed(2)} days</strong>
+                  </div>
+                  <div>
+                    <span>Calibrated delay probability Brier · model / baseline</span>
+                    <strong>{Number(paymentTiming.synthetic_model_evaluation.calibrated_over_3_day_delay_brier).toFixed(3)} / {Number(paymentTiming.synthetic_model_evaluation.prevalence_baseline_brier).toFixed(3)}</strong>
+                  </div>
+                  <div>
+                    <span>Evaluation sample</span>
+                    <strong>{paymentTiming.synthetic_model_evaluation.held_out_rows?.toLocaleString()} rows · {paymentTiming.synthetic_model_evaluation.held_out_payers} payers</strong>
+                  </div>
+                </div>
+              )}
+
               <div className="assumption-note">
                 <AlertTriangle size={16} />
                 <span>
-                  No payment-timing prediction is made without sufficient verified
-                  settlement data. Monte Carlo delay assumptions are separate from
-                  historical model estimates.
+                  The optional timing model is trained only on generated payer histories. It modestly improves held-out synthetic classification calibration, but its delay regressor loses to the historical-median baseline and is disabled. Simulations use the synthetic calibrated probability with an explicit limitation; verified Nessie settlement outcomes are still required for business-specific predictions.
                 </span>
               </div>
             </>
@@ -907,14 +993,14 @@ function App() {
           <div className="panel-header">
             <div>
               <h2>Liquidity Actions</h2>
-              <p>Same simulated futures, compared against a 5% buffer-breach target</p>
+              <p>{decisionData?.horizon_days || 14}-day common-scenario comparison · {decisionData?.simulations?.toLocaleString() || "—"} simulations · 5% buffer-breach target</p>
             </div>
             <div className="metric-icon green"><ShieldCheck size={18} /></div>
           </div>
-          {risk?.daily_balance_percentiles && (
+          {decisionData?.comparisons?.[0]?.daily_balance_percentiles && (
             <div className="chart-area" role="img" aria-label="Simulated cash balance fan chart">
               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={Object.entries(risk.daily_balance_percentiles).map(([day, values]) => ({ day: `Day ${day}`, ...values }))}>
+                <AreaChart data={Object.entries(decisionData.comparisons[0].daily_balance_percentiles).map(([day, values]) => ({ day: `Day ${day}`, ...values }))}>
                   <CartesianGrid stroke="#263940" strokeDasharray="3 3" />
                   <XAxis dataKey="day" stroke="#81959c" tick={{ fontSize: 10 }} />
                   <YAxis stroke="#81959c" tick={{ fontSize: 10 }} tickFormatter={(value) => `$${Math.round(value / 1000)}k`} />
@@ -945,6 +1031,9 @@ function App() {
                   </div>
                 ))}
               </div>
+              <p className="whatif-disclaimer">
+                Illustrative cost assumptions: defer {percentage(decisionData.assumptions?.deferral_fee_rate)} of payment amount; accelerate {percentage(decisionData.assumptions?.acceleration_fee_rate)}; credit line up to {money(decisionData.assumptions?.credit_line_limit)} with {percentage(decisionData.assumptions?.credit_line_fee_rate)} fee. These are planning placeholders, not lender quotes. Unexpected expenses: {percentage(decisionData.assumptions?.unexpected_expense_probability)} daily chance, up to {money(decisionData.assumptions?.max_unexpected_expense)}.
+              </p>
             </>
           ) : <p className="payment-timing-message">{decisionError || "Loading intervention comparison…"}</p>}
         </section>

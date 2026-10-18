@@ -2,6 +2,7 @@
 """Counterfactual attribution of simulated liquidity risk to events."""
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Any
 
 from backend.quant.simulation_engine import (
@@ -23,6 +24,8 @@ def run_risk_attribution(
     max_inflow_delay_days: int = 3,
     max_outflow_uplift: float = 0.15,
     shock_correlation: float = 0.0,
+    unexpected_expense_probability: float = 0.0,
+    max_unexpected_expense: float = 0.0,
 ) -> dict[str, Any]:
     """
     Estimate each event's risk contribution by removing it individually.
@@ -58,14 +61,7 @@ def run_risk_attribution(
 
         seen_ids.add(event_id)
 
-        normalized_events.append(
-            SimulationEvent(
-                day=event.day,
-                kind=event.kind,
-                amount=event.amount,
-                event_id=event_id,
-            )
-        )
+        normalized_events.append(replace(event, event_id=event_id))
 
     shocks = generate_random_shocks(
         events=normalized_events,
@@ -74,6 +70,9 @@ def run_risk_attribution(
         max_inflow_delay_days=max_inflow_delay_days,
         max_outflow_uplift=max_outflow_uplift,
         shock_correlation=shock_correlation,
+        horizon_days=horizon_days,
+        unexpected_expense_probability=unexpected_expense_probability,
+        max_unexpected_expense=max_unexpected_expense,
     )
 
     common_args = {
@@ -87,6 +86,8 @@ def run_risk_attribution(
         "max_outflow_uplift": max_outflow_uplift,
         "random_shocks": shocks,
         "shock_correlation": shock_correlation,
+        "unexpected_expense_probability": unexpected_expense_probability,
+        "max_unexpected_expense": max_unexpected_expense,
     }
 
     baseline = simulate_cashflows(

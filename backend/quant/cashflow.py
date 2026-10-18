@@ -5,15 +5,19 @@ from backend.data.ledger import build_ledger
 from backend.data.nessie_client import NessieClient
 
 
-def project_cashflow(days=7):
+def project_cashflow(days=7, snapshot=None):
     if days < 0:
         raise ValueError("days must be non-negative")
 
-    client = NessieClient()
-
-    account = client.get_account()
-    deposits = client.get_deposits()
-    withdrawals = client.get_withdrawals()
+    if snapshot is None:
+        client = NessieClient()
+        account = client.get_account()
+        deposits = client.get_deposits()
+        withdrawals = client.get_withdrawals()
+    else:
+        account = snapshot["account"]
+        deposits = snapshot["deposits"]
+        withdrawals = snapshot["withdrawals"]
 
     today = date.today()
     ledger = build_ledger(

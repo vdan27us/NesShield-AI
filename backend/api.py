@@ -20,18 +20,22 @@ from backend.quant.stress_testing import run_stress_tests
 from backend.services.gemini_briefing import generate_financial_briefing
 from backend.services.what_if import run_what_if_simulation
 from backend.services.decision_engine import compare_interventions
+from backend.ml.payment_timing_model import get_model_bundle, predict_synthetic_timing
 
 
 BASE_DIR = Path(__file__).resolve().parent
 MODEL_PATH = BASE_DIR / "ml" / "risk_model.joblib"
 
-HORIZON_DAYS = 7
-DEFAULT_SIMULATIONS = 2_000
+HORIZON_DAYS = 14
+DEFAULT_SIMULATIONS = 10_000
 SAFETY_BUFFER = 5_000.0
 RANDOM_SEED = 42
 DEPOSIT_CLEAR_PROBABILITY = 0.70
 MAX_DEPOSIT_DELAY_DAYS = 3
 MAX_OUTFLOW_UPLIFT = 0.15
+UNEXPECTED_EXPENSE_PROBABILITY = 0.03
+MAX_UNEXPECTED_EXPENSE = 1_000.0
+SHOCK_CORRELATION = 0.35
 
 
 app = FastAPI(
@@ -71,7 +75,7 @@ def get_account_data():
 
 
 def get_pending_simulation_context(horizon_days: int = HORIZON_DAYS):
-    """Build the same seven-day pending-event view for risk endpoints."""
+    """Build the shared pending-event ledger for forecast simulations."""
     client, account = get_account_data()
     deposits = client.get_deposits()
     withdrawals = client.get_withdrawals()
@@ -88,20 +92,24 @@ def get_pending_simulation_context(horizon_days: int = HORIZON_DAYS):
     events = []
 
     for item in ledger:
-        if item.status != "pending":
+        if item.status not in {"pending", "scheduled"}:
             continue
 
         if item.effective_date > end_date:
             continue
 
-        events.append(
-            SimulationEvent(
-                day=max(0, (item.effective_date - today).days),
-                kind=item.kind,
-                amount=float(item.amount),
-                event_id=item.event_id,
-            )
+        day = max(0, (item.effective_date - today).days)
+        timing = predict_synthetic_timing(
+            amount=float(item.amount), kind=item.kind,
+            weekday=(today + timedelta(days=day)).weekday(),
         )
+        events.append(SimulationEvent(
+            day=day, kind=item.kind, amount=float(item.amount),
+            event_id=item.event_id,
+            clear_probability=timing["clear_probability"],
+            predicted_delay_days=timing["predicted_delay_days"],
+            late_probability=timing["late_probability"],
+        ))
 
     return account, events
 
@@ -172,6 +180,9 @@ def decision():
                 inflow_clear_probability=DEPOSIT_CLEAR_PROBABILITY,
                 max_inflow_delay_days=MAX_DEPOSIT_DELAY_DAYS,
                 max_outflow_uplift=MAX_OUTFLOW_UPLIFT,
+                shock_correlation=SHOCK_CORRELATION,
+                unexpected_expense_probability=UNEXPECTED_EXPENSE_PROBABILITY,
+                max_unexpected_expense=MAX_UNEXPECTED_EXPENSE,
             )
         }
     except Exception as exc:
@@ -190,7 +201,7 @@ def stress_test(
         le=10_000,
     ),
     shock_correlation: float = Query(
-        default=0.0,
+        default=SHOCK_CORRELATION,
         ge=0.0,
         le=1.0,
     ),
@@ -209,6 +220,9 @@ def stress_test(
             inflow_clear_probability=DEPOSIT_CLEAR_PROBABILITY,
             max_inflow_delay_days=MAX_DEPOSIT_DELAY_DAYS,
             max_outflow_uplift=MAX_OUTFLOW_UPLIFT,
+            shock_correlation=shock_correlation,
+            unexpected_expense_probability=UNEXPECTED_EXPENSE_PROBABILITY,
+            max_unexpected_expense=MAX_UNEXPECTED_EXPENSE,
         )
 
         return {
@@ -234,7 +248,7 @@ def risk_attribution(
         le=10_000,
     ),
     shock_correlation: float = Query(
-        default=0.0,
+        default=SHOCK_CORRELATION,
         ge=0.0,
         le=1.0,
     ),
@@ -254,6 +268,8 @@ def risk_attribution(
             max_inflow_delay_days=MAX_DEPOSIT_DELAY_DAYS,
             max_outflow_uplift=MAX_OUTFLOW_UPLIFT,
             shock_correlation=shock_correlation,
+            unexpected_expense_probability=UNEXPECTED_EXPENSE_PROBABILITY,
+            max_unexpected_expense=MAX_UNEXPECTED_EXPENSE,
         )
 
         return {
@@ -294,6 +310,9 @@ def payment_timing():
                 "verified actual settlement dates."
             ),
             "transactions_inspected": len(transactions),
+            "synthetic_model_evaluation": (
+                (get_model_bundle() or {}).get("evaluation")
+            ),
             "data_source": "Nessie sandbox",
             "limitations": [
                 "No payment-timing prediction is being made.",
@@ -380,6 +399,14 @@ def ml_risk():
             if positive_class_index is not None
             else None
         )
+        baseline_minimum = (
+            scenario["starting_balance"]
+            + (scenario["expected_inflows"]
+               if scenario["inflow_delay_days"] <= 2 else 0.0)
+            - scenario["scheduled_outflows"] * (1.0 + scenario["outflow_uplift"])
+            - scenario["other_expenses"]
+        )
+        baseline_prediction = int(baseline_minimum < 0)
 
         return {
             "model": "Random Forest",
@@ -390,6 +417,17 @@ def ml_risk():
                 else "No shortfall predicted by the model"
             ),
             "model_score": score,
+            "baseline": {
+                "model": "Deterministic seven-day shortfall rule",
+                "prediction": baseline_prediction,
+                "projected_minimum_balance": round(baseline_minimum, 2),
+                "feature_assumptions": {
+                    "inflows_credited_only_if_delay_at_most_days": 2,
+                    "outflow_uplift": scenario["outflow_uplift"],
+                    "other_expenses": scenario["other_expenses"],
+                },
+            },
+            "agrees_with_baseline": prediction == baseline_prediction,
             "score_interpretation": (
                 "Model score for the synthetic shortfall class; "
                 "not a calibrated real-world probability."
@@ -420,11 +458,15 @@ def briefing():
     try:
         client, account_data = get_account_data()
 
-        forecast_data = project_cashflow(days=HORIZON_DAYS)
-        monte_carlo_data = run_monte_carlo()
-
         deposits = client.get_deposits()
         withdrawals = client.get_withdrawals()
+        snapshot = {
+            "account": account_data,
+            "deposits": deposits,
+            "withdrawals": withdrawals,
+        }
+        forecast_data = project_cashflow(days=HORIZON_DAYS, snapshot=snapshot)
+        monte_carlo_data = run_monte_carlo(snapshot=snapshot)
 
         pending_deposits = [
             {
